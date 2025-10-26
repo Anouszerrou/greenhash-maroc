@@ -1,0 +1,31 @@
+{
+  "name": "green-hash-maroc",
+  "version": "1.0.0",
+  "description": "Plateforme Web3 écologique pour le minage vert au Maroc",
+  "main": "index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\"",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:backend": "cd backend && python app.py",
+    "build": "cd frontend && npm run build",
+    "start": "cd backend && python app.py",
+    "install:all": "npm install && cd frontend && npm install && cd ../backend && pip install -r requirements.txt"
+  },
+  "keywords": [
+    "web3",
+    "blockchain",
+    "green-mining",
+    "defi",
+    "maroc"
+  ],
+  "author": "Green Hash Maroc",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "dependencies": {
+    "emailjs-com": "^3.2.0",
+    "react-icons": "^5.5.0",
+    "web3": "^4.16.0"
+  }
+}
