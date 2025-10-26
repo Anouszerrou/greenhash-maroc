@@ -4,17 +4,28 @@
     {
       "src": "frontend/package.json",
       "use": "@vercel/static-build",
-      "config": {
-        "distDir": "frontend/dist"
-      }
+      "config": { "distDir": "frontend/dist" }
     }
   ],
   "framework": "vite",
-  "buildCommand": "cd frontend && npm install && npm run build",
+  "buildCommand": "npm run build",
   "outputDirectory": "frontend/dist",
-  "installCommand": "cd frontend && npm install",
   "rewrites": [
-    { "source": "/(.*)", "destination": "/frontend/index.html" }
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "X-XSS-Protection", "value": "1; mode=block" },
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self' https://api.emailjs.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.emailjs.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self' https://api.emailjs.com https://*.infura.io https://*.alchemyapi.io"
+        }
+      ]
+    }
   ],
   "env": {
     "VITE_EMAILJS_SERVICE_ID": "service_hw50w0e",
