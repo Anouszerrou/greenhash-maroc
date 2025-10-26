@@ -29,9 +29,9 @@
     }
   ],
   "env": {
-    "VITE_EMAILJS_SERVICE_ID": "@vite_emailjs_service_id",
-    "VITE_EMAILJS_TEMPLATE_ID": "@vite_emailjs_template_id",
-    "VITE_EMAILJS_PUBLIC_KEY": "@vite_emailjs_public_key",
+    "VITE_EMAILJS_SERVICE_ID": "service_hw50w0e",
+    "VITE_EMAILJS_TEMPLATE_ID": "template_g0j1rtk",
+    "VITE_EMAILJS_PUBLIC_KEY": "leYl-vHCy7ivLcc1D",
     "VITE_ALCHEMY_API_KEY": "@vite_alchemy_api_key",
     "VITE_INFURA_PROJECT_ID": "@vite_infura_project_id"
   }
