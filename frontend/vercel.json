@@ -1,0 +1,38 @@
+{
+  "framework": "vite",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "X-XSS-Protection",
+          "value": "1; mode=block"
+        },
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self' https://api.emailjs.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.emailjs.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self' https://api.emailjs.com https://*.infura.io https://*.alchemyapi.io"
+        }
+      ]
+    }
+  ],
+  "env": {
+    "VITE_EMAILJS_SERVICE_ID": "@vite_emailjs_service_id",
+    "VITE_EMAILJS_TEMPLATE_ID": "@vite_emailjs_template_id",
+    "VITE_EMAILJS_PUBLIC_KEY": "@vite_emailjs_public_key",
+    "VITE_ALCHEMY_API_KEY": "@vite_alchemy_api_key",
+    "VITE_INFURA_PROJECT_ID": "@vite_infura_project_id"
+  }
+}
