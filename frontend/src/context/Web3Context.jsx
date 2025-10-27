@@ -3,6 +3,8 @@ import { ethers } from 'ethers';
 import { toast } from 'react-toastify';
 
 const Web3Context = createContext();
+const CACHED_PROVIDER = 'cachedWeb3Provider';
+const TX_TIMEOUT = 60000; // 60 seconds
 
 export const useWeb3 = () => {
   const context = useContext(Web3Context);
@@ -19,14 +21,14 @@ export const Web3Provider = ({ children }) => {
   const [chainId, setChainId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [balance, setBalance] = useState('0');
+  const [pendingTxs, setPendingTxs] = useState(new Set());
 
+  // Network configuration
+  const SEPOLIA_CHAIN_ID = 11155111;
   const BSC_TESTNET_CHAIN_ID = 97;
   const BSC_MAINNET_CHAIN_ID = 56;
 
-  // Sepolia (Ethereum testnet) chain id
-  const SEPOLIA_CHAIN_ID = 11155111;
-
-  // Read RPC keys from Vite environment variables (VITE_ prefix)
+  // RPC Configuration
   const ALCHEMY_KEY = import.meta.env.VITE_ALCHEMY_API_KEY;
   const INFURA_ID = import.meta.env.VITE_INFURA_PROJECT_ID;
 
@@ -36,6 +38,99 @@ export const Web3Provider = ({ children }) => {
     return 'https://rpc.sepolia.org';
   };
 
+  // Error handling
+  const handleWeb3Error = (error) => {
+    if (error.code === 4001) {
+      toast.error('Transaction refusée par l\'utilisateur');
+    } else if (error.code === -32002) {
+      toast.error('Une requête de connexion est déjà en cours');
+    } else if (error.code === -32603) {
+      toast.error('Erreur interne RPC');
+    } else if (error.message?.includes('user rejected')) {
+      toast.error('Action annulée par l\'utilisateur');
+    } else if (error.message?.includes('insufficient funds')) {
+      toast.error('Fonds insuffisants pour effectuer la transaction');
+    } else {
+      toast.error(`Erreur: ${error.message || 'Erreur inconnue'}`);
+    }
+    console.error('Web3 Error:', error);
+  };
+
+  // Network verification
+  const verifyNetwork = async () => {
+    try {
+      const network = await provider?.getNetwork();
+      if (!network) return false;
+
+      if (network.chainId !== SEPOLIA_CHAIN_ID) {
+        toast.warning('Changement vers le réseau Sepolia...');
+        await switchToSepoliaNetwork();
+        return false;
+      }
+      return true;
+    } catch (error) {
+      handleWeb3Error(error);
+      return false;
+    }
+  };
+
+  // Transaction management
+  const withTimeout = (promise) => {
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Transaction timeout')), TX_TIMEOUT)
+    );
+    return Promise.race([promise, timeout]);
+  };
+
+  const withRetry = async (fn, retries = 3) => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        return await fn();
+      } catch (error) {
+        if (i === retries - 1) throw error;
+        await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+      }
+    }
+  };
+
+  const addPendingTx = (txHash) => {
+    setPendingTxs(prev => new Set(prev).add(txHash));
+  };
+
+  const removePendingTx = (txHash) => {
+    setPendingTxs(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(txHash);
+      return newSet;
+    });
+  };
+
+  // Safe contract call wrapper
+  const safeContractCall = async (contractCall) => {
+    try {
+      if (!await verifyNetwork()) return null;
+      
+      const tx = await withTimeout(contractCall());
+      addPendingTx(tx.hash);
+      toast.info('Transaction envoyée...');
+      
+      const receipt = await tx.wait();
+      removePendingTx(tx.hash);
+      
+      if (receipt.status === 1) {
+        toast.success('Transaction confirmée!');
+        return receipt;
+      } else {
+        toast.error('Transaction échouée');
+        return null;
+      }
+    } catch (error) {
+      handleWeb3Error(error);
+      return null;
+    }
+  };
+
+  // Connect wallet
   const connectWallet = async () => {
     try {
       setLoading(true);
@@ -44,8 +139,10 @@ export const Web3Provider = ({ children }) => {
         const web3Provider = new ethers.providers.Web3Provider(window.ethereum);
         setProvider(web3Provider);
 
-        // Demander l'accès aux comptes
-        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        const accounts = await withRetry(() => 
+          window.ethereum.request({ method: 'eth_requestAccounts' })
+        );
+
         if (!accounts || accounts.length === 0) {
           toast.error('Aucun compte trouvé');
           return;
@@ -54,126 +151,137 @@ export const Web3Provider = ({ children }) => {
         const web3Signer = web3Provider.getSigner();
         setSigner(web3Signer);
         setAccount(accounts[0]);
+        localStorage.setItem(CACHED_PROVIDER, 'injected');
 
         const network = await web3Provider.getNetwork();
         setChainId(network.chainId);
 
-        if (network.chainId !== SEPOLIA_CHAIN_ID) {
-          toast.info('Connectez-vous au réseau Sepolia (testnet) pour tester la dApp');
-        }
+        await verifyNetwork();
 
         const bal = await web3Provider.getBalance(accounts[0]);
         setBalance(ethers.utils.formatEther(bal));
+        
         toast.success('Wallet connecté avec succès!');
       } else {
-        // No injected provider — use a read-only JsonRpcProvider (Sepolia) as fallback
+        // No injected provider - use read-only RPC
         const rpc = getSepoliaRpcUrl();
         const jsonProvider = new ethers.providers.JsonRpcProvider(rpc);
         setProvider(jsonProvider);
         setSigner(null);
         setAccount(null);
+        localStorage.removeItem(CACHED_PROVIDER);
+        
         const network = await jsonProvider.getNetwork();
         setChainId(network.chainId);
-        toast.info('Fournisseur en lecture seule connecté à Sepolia');
+        toast.info('Mode lecture seule (Sepolia)');
       }
     } catch (error) {
-      console.error('Erreur de connexion:', error);
-      toast.error('Erreur lors de la connexion au wallet');
+      handleWeb3Error(error);
     } finally {
       setLoading(false);
     }
   };
 
-  const switchToBSCNetwork = async () => {
+  // Network switching
+  const switchToSepoliaNetwork = async () => {
     try {
       await window.ethereum.request({
         method: 'wallet_switchEthereumChain',
-        params: [{ chainId: `0x${BSC_TESTNET_CHAIN_ID.toString(16)}` }],
+        params: [{ chainId: `0x${SEPOLIA_CHAIN_ID.toString(16)}` }],
       });
     } catch (switchError) {
-      // Si le réseau n'est pas ajouté, l'ajouter
       if (switchError.code === 4902) {
         try {
           await window.ethereum.request({
             method: 'wallet_addEthereumChain',
             params: [{
-              chainId: `0x${BSC_TESTNET_CHAIN_ID.toString(16)}`,
-              chainName: 'BNB Smart Chain Testnet',
+              chainId: `0x${SEPOLIA_CHAIN_ID.toString(16)}`,
+              chainName: 'Sepolia',
               nativeCurrency: {
-                name: 'BNB',
-                symbol: 'BNB',
+                name: 'ETH',
+                symbol: 'ETH',
                 decimals: 18
               },
-              rpcUrls: ['https://data-seed-prebsc-1-s1.binance.org:8545/'],
-              blockExplorerUrls: ['https://testnet.bscscan.com/']
+              rpcUrls: [getSepoliaRpcUrl()],
+              blockExplorerUrls: ['https://sepolia.etherscan.io']
             }]
           });
         } catch (addError) {
-          console.error('Erreur lors de l\'ajout du réseau:', addError);
+          handleWeb3Error(addError);
         }
+      } else {
+        handleWeb3Error(switchError);
       }
     }
   };
 
+  // Wallet disconnection
   const disconnectWallet = () => {
-    setAccount(null);
     setProvider(null);
     setSigner(null);
+    setAccount(null);
     setChainId(null);
     setBalance('0');
+    localStorage.removeItem(CACHED_PROVIDER);
     toast.info('Wallet déconnecté');
   };
 
-  // Écouter les changements de compte
+  // Auto-connect on mount if previously connected
+  useEffect(() => {
+    const cachedProvider = localStorage.getItem(CACHED_PROVIDER);
+    if (cachedProvider === 'injected') {
+      connectWallet();
+    }
+  }, []);
+
+  // Event listeners
   useEffect(() => {
     if (window.ethereum) {
-      window.ethereum.on('accountsChanged', (accounts) => {
+      const handleAccountsChanged = (accounts) => {
         if (accounts.length === 0) {
           disconnectWallet();
         } else {
           setAccount(accounts[0]);
         }
-      });
+      };
 
-      window.ethereum.on('chainChanged', (chainId) => {
+      const handleChainChanged = () => {
         window.location.reload();
-      });
-    }
+      };
 
-    return () => {
-      if (window.ethereum) {
-        window.ethereum.removeAllListeners('accountsChanged');
-        window.ethereum.removeAllListeners('chainChanged');
-      }
-    };
+      const handleDisconnect = () => {
+        disconnectWallet();
+      };
+
+      window.ethereum.on('accountsChanged', handleAccountsChanged);
+      window.ethereum.on('chainChanged', handleChainChanged);
+      window.ethereum.on('disconnect', handleDisconnect);
+
+      return () => {
+        window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
+        window.ethereum.removeListener('chainChanged', handleChainChanged);
+        window.ethereum.removeListener('disconnect', handleDisconnect);
+      };
+    }
   }, []);
 
-  // Rafraîchir le solde toutes les 5 secondes
+  // Balance refresh
   useEffect(() => {
+    let interval;
     if (account && provider) {
-      const interval = setInterval(async () => {
+      interval = setInterval(async () => {
         try {
-          const balance = await provider.getBalance(account);
-          setBalance(ethers.utils.formatEther(balance));
+          const bal = await provider.getBalance(account);
+          setBalance(ethers.utils.formatEther(bal));
         } catch (error) {
-          console.error('Erreur lors de la récupération du solde:', error);
+          console.error('Error refreshing balance:', error);
         }
       }, 5000);
-
-      return () => clearInterval(interval);
     }
+    return () => interval && clearInterval(interval);
   }, [account, provider]);
 
-  const connectSepoliaRpc = (prefer = 'alchemy') => {
-    const rpc = getSepoliaRpcUrl();
-    const jsonProvider = new ethers.providers.JsonRpcProvider(rpc);
-    setProvider(jsonProvider);
-    setSigner(null);
-    setAccount(null);
-    jsonProvider.getNetwork().then((n) => setChainId(n.chainId)).catch(() => {});
-    return jsonProvider;
-  };
-
+  // Context value
   const value = {
     account,
     provider,
@@ -181,20 +289,22 @@ export const Web3Provider = ({ children }) => {
     chainId,
     loading,
     balance,
+    pendingTxs,
     connectWallet,
     disconnectWallet,
-    switchToBSCNetwork,
-    connectSepoliaRpc,
-    // helper to connect a token contract once address & ABI are known
-    connectTokenContract: (tokenAddress, tokenAbi) => {
-      if (!tokenAddress || !tokenAbi) return null;
+    verifyNetwork,
+    safeContractCall,
+    // Contract connection helper
+    connectContract: (address, ABI) => {
+      if (!address || !ABI) return null;
       try {
-        const ctr = signer
-          ? new ethers.Contract(tokenAddress, tokenAbi, signer)
-          : new ethers.Contract(tokenAddress, tokenAbi, provider);
-        return ctr;
-      } catch (err) {
-        console.error('Erreur création contrat token:', err);
+        return new ethers.Contract(
+          address,
+          ABI,
+          signer || provider
+        );
+      } catch (error) {
+        console.error('Contract creation error:', error);
         return null;
       }
     }

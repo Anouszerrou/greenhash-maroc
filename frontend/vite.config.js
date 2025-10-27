@@ -13,6 +13,21 @@ export default defineConfig({
       }
     }
   },
+  build: {
+    outDir: 'dist',
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor': ['react', 'react-dom', 'react-router-dom'],
+          'web3': ['ethers', 'web3modal'],
+          'ui': ['@headlessui/react', 'framer-motion', 'react-toastify'],
+          'charts': ['chart.js', 'react-chartjs-2']
+        }
+      }
+    },
+    chunkSizeWarningLimit: 1000,
+    sourcemap: false
+  },
   define: {
     global: 'globalThis',
   },

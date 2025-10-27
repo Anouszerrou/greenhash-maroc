@@ -1,13 +1,222 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useWeb3 } from '../context/Web3Context';
 import { Package, Zap, Shield, TrendingUp, Clock, Check } from 'lucide-react';
 import { toast } from 'react-toastify';
+import { ethers } from 'ethers';
+import { useNetwork } from 'wagmi';
+import PendingTransactionsList from '../components/PendingTransactionsList';
+
+// Investment contract ABI
+const INVESTMENT_CONTRACT_ABI = [
+  "function invest(uint256 packageId, uint256 amount) payable returns (bool)",
+  "function getPackageDetails(uint256 packageId) view returns (uint256 minAmount, uint256 maxAmount, uint256 apr, uint256 duration)",
+  "function getUserInvestment(address user) view returns (uint256 amount, uint256 packageId, uint256 startTime, uint256 endTime)",
+  "function withdraw() external returns (bool)",
+  "function getRewards() view returns (uint256)",
+  "function claimRewards() external returns (bool)"
+];
 
 const Invest = () => {
-  const { account } = useWeb3();
+  const { account, connectWallet, safeContractCall, connectContract } = useWeb3();
+  const { chain } = useNetwork();
+
+  // Contract addresses based on network
+  const INVESTMENT_CONTRACT_ADDRESS = chain?.id === 11155111 // Sepolia
+    ? import.meta.env.VITE_SEPOLIA_INVESTMENT_ADDRESS
+    : import.meta.env.VITE_BSC_INVESTMENT_ADDRESS;
+
   const [selectedPackage, setSelectedPackage] = useState(null);
   const [isInvesting, setIsInvesting] = useState(false);
+  const [investmentAmount, setInvestmentAmount] = useState('');
+  const [userInvestment, setUserInvestment] = useState(null);
+  const [availableRewards, setAvailableRewards] = useState('0');
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Load user's investment data
+  useEffect(() => {
+    const loadUserInvestment = async () => {
+      if (!account || !INVESTMENT_CONTRACT_ADDRESS) return;
+      
+      try {
+        const contract = connectContract(INVESTMENT_CONTRACT_ADDRESS, INVESTMENT_CONTRACT_ABI);
+        if (!contract) throw new Error('Cannot connect to investment contract');
+
+        const [investment, rewards] = await Promise.all([
+          contract.getUserInvestment(account),
+          contract.getRewards()
+        ]);
+
+        setUserInvestment({
+          amount: ethers.utils.formatEther(investment.amount),
+          packageId: investment.packageId.toNumber(),
+          startTime: new Date(investment.startTime.toNumber() * 1000),
+          endTime: new Date(investment.endTime.toNumber() * 1000)
+        });
+
+        setAvailableRewards(ethers.utils.formatEther(rewards));
+      } catch (error) {
+        console.error('Error loading investment data:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadUserInvestment();
+  }, [account, INVESTMENT_CONTRACT_ADDRESS]);
+  const handleInvest = async () => {
+    if (!account) {
+      toast.error('Veuillez connecter votre wallet');
+      return;
+    }
+
+    if (!selectedPackage) {
+      toast.error('Veuillez sélectionner un package');
+      return;
+    }
+
+    if (!investmentAmount || parseFloat(investmentAmount) <= 0) {
+      toast.error('Veuillez entrer un montant valide');
+      return;
+    }
+
+    const minAmount = parseFloat(selectedPackage.minInvestment.replace(',', ''));
+    const maxAmount = parseFloat(selectedPackage.maxInvestment.replace(',', ''));
+    const amount = parseFloat(investmentAmount);
+
+    if (amount < minAmount || amount > maxAmount) {
+      toast.error(`Le montant doit être entre ${minAmount} et ${maxAmount} BNB`);
+      return;
+    }
+
+    setIsInvesting(true);
+
+    try {
+      if (INVESTMENT_CONTRACT_ADDRESS) {
+        const contract = connectContract(INVESTMENT_CONTRACT_ADDRESS, INVESTMENT_CONTRACT_ABI);
+        if (!contract) throw new Error('Cannot connect to investment contract');
+
+        // Get package ID from selected package
+        const packageId = ['starter', 'advanced', 'premium'].indexOf(selectedPackage.id);
+        if (packageId === -1) throw new Error('Invalid package');
+
+        const receipt = await safeContractCall(async ({ signer, estimateGasWithPrice }) => {
+          const contractWithSigner = contract.connect(signer);
+          const amountInWei = ethers.utils.parseEther(investmentAmount);
+
+          // Populate transaction for gas estimation
+          const populated = await contractWithSigner.populateTransaction.invest(
+            packageId,
+            amountInWei,
+            { value: amountInWei }
+          );
+
+          // Estimate gas
+          const { gasLimit, gasPrice } = await estimateGasWithPrice(() => populated);
+
+          // Execute investment
+          const tx = await contractWithSigner.invest(
+            packageId,
+            amountInWei,
+            { 
+              value: amountInWei,
+              gasLimit,
+              gasPrice
+            }
+          );
+
+          return tx;
+        });
+
+        if (receipt) {
+          toast.success(`Investissement de ${investmentAmount} BNB confirmé!`);
+          setInvestmentAmount('');
+          setSelectedPackage(null);
+          // Reload user investment data
+          await loadUserInvestment();
+        }
+      } else {
+        // FIX: Fallback to simulation for testing
+        const fakeReceipt = await safeContractCall(() => {
+          const fakeTx = {
+            hash: '0x' + Math.random().toString(16).slice(2, 66),
+            wait: async () => new Promise(resolve => setTimeout(() => resolve({ 
+              status: 1, 
+              transactionHash: '0xsimulated-investment' 
+            }), 2000))
+          };
+          return Promise.resolve(fakeTx);
+        });
+
+        if (fakeReceipt) {
+          toast.success(`Investissement de ${investmentAmount} BNB (simulation) réussi!`);
+          setInvestmentAmount('');
+          setSelectedPackage(null);
+        }
+      }
+    } catch (error) {
+      toast.error(`Erreur lors de l'investissement: ${error.message}`);
+    } finally {
+      setIsInvesting(false);
+    }
+  };
+
+  const handleClaimRewards = async () => {
+    if (!account) {
+      toast.error('Veuillez connecter votre wallet');
+      return;
+    }
+
+    try {
+      if (INVESTMENT_CONTRACT_ADDRESS) {
+        const contract = connectContract(INVESTMENT_CONTRACT_ADDRESS, INVESTMENT_CONTRACT_ABI);
+        if (!contract) throw new Error('Cannot connect to investment contract');
+
+        const receipt = await safeContractCall(async ({ signer, estimateGasWithPrice }) => {
+          const contractWithSigner = contract.connect(signer);
+
+          // Populate transaction for gas estimation
+          const populated = await contractWithSigner.populateTransaction.claimRewards();
+
+          // Estimate gas
+          const { gasLimit, gasPrice } = await estimateGasWithPrice(() => populated);
+
+          // Execute claim
+          const tx = await contractWithSigner.claimRewards({ 
+            gasLimit,
+            gasPrice
+          });
+
+          return tx;
+        });
+
+        if (receipt) {
+          toast.success('Récompenses réclamées avec succès!');
+          // Reload rewards data
+          await loadUserInvestment();
+        }
+      } else {
+        // Simulation fallback
+        const fakeReceipt = await safeContractCall(() => {
+          const fakeTx = {
+            hash: '0x' + Math.random().toString(16).slice(2, 66),
+            wait: async () => new Promise(resolve => setTimeout(() => resolve({ 
+              status: 1, 
+              transactionHash: '0xsimulated-claim' 
+            }), 2000))
+          };
+          return Promise.resolve(fakeTx);
+        });
+
+        if (fakeReceipt) {
+          toast.success('Récompenses réclamées avec succès! (simulation)');
+          setAvailableRewards('0');
+        }
+      }
+    } catch (error) {
+      toast.error(`Erreur lors de la réclamation: ${error.message}`);
+    }
+  };
 
   const investmentPackages = [
     {
@@ -87,8 +296,168 @@ const Invest = () => {
   return (
     <div className="min-h-screen pt-20 pb-12">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        {/* Transaction List */}
+        <PendingTransactionsList />
+
+        {/* Investment Packages */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+          {investmentPackages.map((pkg) => (
+            <motion.div
+              key={pkg.id}
+              whileHover={{ scale: 1.02 }}
+              className={`relative bg-gradient-to-br ${pkg.color} rounded-xl overflow-hidden shadow-xl`}
+            >
+              {pkg.popular && (
+                <div className="absolute top-0 right-0 bg-yellow-400 text-xs font-semibold px-3 py-1 rounded-bl-lg">
+                  Populaire
+                </div>
+              )}
+              <div className="p-8">
+                <div className="flex items-center mb-4">
+                  {pkg.icon}
+                  <h3 className="text-2xl font-bold text-white ml-3">{pkg.name}</h3>
+                </div>
+                <div className="space-y-4">
+                  <div>
+                    <p className="text-sm text-white/80">Investissement</p>
+                    <p className="text-xl font-semibold text-white">
+                      {pkg.minInvestment} - {pkg.maxInvestment} BNB
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-white/80">APR</p>
+                    <p className="text-xl font-semibold text-white">{pkg.apr}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-white/80">Durée</p>
+                    <p className="text-xl font-semibold text-white">{pkg.duration}</p>
+                  </div>
+                  <ul className="space-y-2">
+                    {pkg.features.map((feature, idx) => (
+                      <li key={idx} className="flex items-center text-white">
+                        <Check className="w-5 h-5 mr-2 flex-shrink-0" />
+                        <span>{feature}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  
+                  {selectedPackage?.id === pkg.id ? (
+                    <div className="mt-6 space-y-4">
+                      <input
+                        type="number"
+                        value={investmentAmount}
+                        onChange={(e) => setInvestmentAmount(e.target.value)}
+                        placeholder={`${pkg.minInvestment} - ${pkg.maxInvestment} BNB`}
+                        className="w-full px-4 py-2 rounded-lg border-2 border-white/20 bg-white/10 text-white placeholder-white/50"
+                      />
+                      <div className="flex space-x-2">
+                        <button
+                          onClick={handleInvest}
+                          disabled={isInvesting}
+                          className="flex-1 px-6 py-3 bg-white text-gray-900 rounded-lg font-semibold hover:bg-opacity-90 disabled:opacity-50"
+                        >
+                          {isInvesting ? 'Investissement...' : 'Confirmer'}
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSelectedPackage(null);
+                            setInvestmentAmount('');
+                          }}
+                          className="px-6 py-3 bg-white/20 text-white rounded-lg font-semibold hover:bg-opacity-30"
+                        >
+                          Annuler
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setSelectedPackage(pkg)}
+                      className="mt-6 w-full px-6 py-3 bg-white text-gray-900 rounded-lg font-semibold hover:bg-opacity-90 disabled:opacity-50"
+                      disabled={isInvesting || (userInvestment && userInvestment.packageId >= 0)}
+                    >
+                      {userInvestment && userInvestment.packageId >= 0
+                        ? 'Investissement actif'
+                        : 'Investir maintenant'
+                      }
+                    </button>
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          ))}
+        </div>
+      </div>
+    </div>
+          {/* Transaction List */}
+          <PendingTransactionsList />
+
         {/* Header */}
-        <div className="text-center mb-12">
+          <div className="text-center mb-8">
+            <h1 className="text-4xl font-bold text-gray-900 mb-4">
+              Investir dans Green Hash
+            </h1>
+            <p className="text-lg text-gray-600 max-w-3xl mx-auto">
+              Rejoignez notre communauté d'investisseurs et participez à la révolution du minage écologique
+            </p>
+          </div>
+
+          {/* User Investment Status */}
+          {account && (
+            <div className="mb-8 p-6 bg-white rounded-lg shadow-md">
+              <h2 className="text-2xl font-semibold mb-4">Votre investissement</h2>
+              {isLoading ? (
+                <p>Chargement...</p>
+              ) : userInvestment ? (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div>
+                      <p className="text-sm text-gray-600">Montant investi</p>
+                      <p className="text-lg font-semibold">{userInvestment.amount} BNB</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">Package</p>
+                      <p className="text-lg font-semibold">
+                        {investmentPackages[userInvestment.packageId]?.name || 'N/A'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">Date de début</p>
+                      <p className="text-lg font-semibold">
+                        {userInvestment.startTime.toLocaleDateString()}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">Date de fin</p>
+                      <p className="text-lg font-semibold">
+                        {userInvestment.endTime.toLocaleDateString()}
+                      </p>
+                    </div>
+                  </div>
+                
+                  {/* Rewards Section */}
+                  <div className="mt-6 p-4 bg-green-50 rounded-lg">
+                    <div className="flex justify-between items-center">
+                      <div>
+                        <p className="text-sm text-gray-600">Récompenses disponibles</p>
+                        <p className="text-xl font-semibold text-green-600">
+                          {availableRewards} GREENHASH
+                        </p>
+                      </div>
+                      <button
+                        onClick={handleClaimRewards}
+                        disabled={parseFloat(availableRewards) <= 0}
+                        className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Réclamer
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <p>Aucun investissement actif</p>
+              )}
+            </div>
+          )}
           <motion.h1 
             className="text-4xl md:text-5xl font-bold mb-4"
             initial={{ opacity: 0, y: 50 }}

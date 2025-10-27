@@ -3,9 +3,31 @@ import { motion } from 'framer-motion';
 import { useWeb3 } from '../context/Web3Context';
 import { Zap, TrendingUp, Clock, Shield, DollarSign, Leaf } from 'lucide-react';
 import { toast } from 'react-toastify';
+import { ethers } from 'ethers';
+import PendingTransactionsList from '../components/PendingTransactionsList';
+
+// FIX: Add staking contract ABI
+const STAKING_POOL_ABI = [
+  "function deposit(uint256 amount)",
+  "function withdraw(uint256 amount)",
+  "function claim()",
+  "function userInfo(address) view returns (uint256 amount, uint256 rewardDebt, uint256 depositTime)"
+];
 
 const MiningPool = () => {
-  const { account, connectWallet } = useWeb3();
+  const { 
+    account, 
+    connectWallet, 
+    safeContractCall, 
+    connectContract,
+    estimateGasWithPrice,
+    balance 
+  } = useWeb3();
+
+  // FIX: Get staking contract address from env
+  const STAKING_POOL_ADDRESS = import.meta.env.VITE_STAKING_POOL_ADDRESS || 
+    import.meta.env.VITE_APP_STAKING_POOL_ADDRESS || null;
+
   const [stakeAmount, setStakeAmount] = useState('');
   const [userStaked, setUserStaked] = useState('0');
   const [totalStaked, setTotalStaked] = useState('1250000');
@@ -40,14 +62,48 @@ const MiningPool = () => {
     }
 
     setIsStaking(true);
-    
     try {
-      // Simuler la transaction de staking
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      toast.success(`Staking de ${stakeAmount} GREENHASH réussi!`);
-      setUserStaked((parseFloat(userStaked) + parseFloat(stakeAmount)).toString());
-      setStakeAmount('');
+      if (STAKING_POOL_ADDRESS) {
+        const contract = connectContract(STAKING_POOL_ADDRESS, STAKING_POOL_ABI);
+        if (!contract) throw new Error('Impossible de connecter le contrat de staking');
+
+        const receipt = await safeContractCall(async ({ signer, estimateGasWithPrice }) => {
+          const contractWithSigner = contract.connect(signer);
+          const amount = ethers.utils.parseUnits(stakeAmount.toString(), 18);
+          const populated = await contractWithSigner.populateTransaction.deposit(amount);
+          const { gasLimit, gasPrice } = await estimateGasWithPrice(() => populated);
+          const tx = await contractWithSigner.deposit(amount, { gasLimit, gasPrice });
+          return tx;
+        });
+
+        if (receipt) {
+          toast.success(`Staking de ${stakeAmount} GREENHASH confirmé!`);
+          setUserStaked((prev) => ethers.utils.formatUnits(
+            ethers.utils.parseUnits(prev).add(
+              ethers.utils.parseUnits(stakeAmount)
+            )
+          ));
+          setStakeAmount('');
+        }
+      } else {
+        // FIX: Fallback to simulation via safeContractCall
+        const fakeReceipt = await safeContractCall(() => {
+          const fakeTx = {
+            hash: '0x' + Math.random().toString(16).slice(2, 66),
+            wait: async () => new Promise(resolve => setTimeout(() => resolve({ 
+              status: 1, 
+              transactionHash: '0xsimulated'
+            }), 2000))
+          };
+          return Promise.resolve(fakeTx);
+        });
+
+        if (fakeReceipt) {
+          toast.success(`Staking de ${stakeAmount} GREENHASH (simulation) réussi!`);
+          setUserStaked((parseFloat(userStaked) + parseFloat(stakeAmount)).toString());
+          setStakeAmount('');
+        }
+      }
     } catch (error) {
       toast.error('Erreur lors du staking');
     } finally {
@@ -62,13 +118,39 @@ const MiningPool = () => {
     }
 
     try {
-      // Simuler la transaction de claim
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      toast.success(`Récompenses de ${userRewards} GREENHASH réclamées!`);
-      setUserRewards('0');
+      if (STAKING_POOL_ADDRESS) {
+        const contract = connectContract(STAKING_POOL_ADDRESS, STAKING_POOL_ABI);
+        const receipt = await safeContractCall(async ({ signer, estimateGasWithPrice }) => {
+          const contractWithSigner = contract.connect(signer);
+          const populated = await contractWithSigner.populateTransaction.claim();
+          const { gasLimit, gasPrice } = await estimateGasWithPrice(() => populated);
+          const tx = await contractWithSigner.claim({ gasLimit, gasPrice });
+          return tx;
+        });
+
+        if (receipt) {
+          toast.success(`Récompenses de ${userRewards} GREENHASH réclamées!`);
+          setUserRewards('0');
+        }
+      } else {
+        const fakeReceipt = await safeContractCall(() => {
+          const fakeTx = {
+            hash: '0x' + Math.random().toString(16).slice(2, 66),
+            wait: async () => new Promise(resolve => setTimeout(() => resolve({ 
+              status: 1, 
+              transactionHash: '0xsimulated-claim'
+            }), 1500))
+          };
+          return Promise.resolve(fakeTx);
+        });
+
+        if (fakeReceipt) {
+          toast.success(`Récompenses de ${userRewards} GREENHASH (simulation) réclamées!`);
+          setUserRewards('0');
+        }
+      }
     } catch (error) {
-      toast.error('Erreur lors de la réclamation');
+      toast.error(`Erreur lors de la réclamation: ${error.message}`);
     }
   };
 
@@ -79,14 +161,42 @@ const MiningPool = () => {
     }
 
     try {
-      // Simuler la transaction de unstake
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      toast.success(`Unstake de ${userStaked} GREENHASH réussi!`);
-      setUserStaked('0');
+      if (STAKING_POOL_ADDRESS) {
+        const contract = connectContract(STAKING_POOL_ADDRESS, STAKING_POOL_ABI);
+        const amount = ethers.utils.parseUnits(userStaked.toString(), 18);
+        const receipt = await safeContractCall(async ({ signer, estimateGasWithPrice }) => {
+          const contractWithSigner = contract.connect(signer);
+          const populated = await contractWithSigner.populateTransaction.withdraw(amount);
+          const { gasLimit, gasPrice } = await estimateGasWithPrice(() => populated);
+          const tx = await contractWithSigner.withdraw(amount, { gasLimit, gasPrice });
+          return tx;
+        });
+
+        if (receipt) {
+          toast.success(`Retrait de ${userStaked} GREENHASH confirmé!`);
+          setUserStaked('0');
+        }
+      } else {
+        const fakeReceipt = await safeContractCall(() => {
+          const fakeTx = {
+            hash: '0x' + Math.random().toString(16).slice(2, 66),
+            wait: async () => new Promise(resolve => setTimeout(() => resolve({ 
+              status: 1, 
+              transactionHash: '0xsimulated-unstake' 
+            }), 2000))
+          };
+          return Promise.resolve(fakeTx);
+        });
+
+        if (fakeReceipt) {
+          toast.success(`Retrait de ${userStaked} GREENHASH (simulation) confirmé!`);
+          setUserStaked('0');
+        }
+      }
     } catch (error) {
-      toast.error('Erreur lors du unstake');
+      toast.error(`Erreur lors du retrait: ${error.message}`);
     }
+
   };
 
   const features = [
@@ -116,9 +226,15 @@ const MiningPool = () => {
     }
   ];
 
+  // FIX: Display native balance if available
+  const nativeBalanceDisplay = balance ? 
+    `${parseFloat(balance).toFixed(4)} ${import.meta.env.VITE_NATIVE_SYMBOL || 'BNB'}` : 
+    null;
+
   return (
     <div className="min-h-screen pt-20 pb-12">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+  <PendingTransactionsList />
         {/* Header */}
         <div className="text-center mb-12">
           <motion.h1 

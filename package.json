@@ -7,8 +7,8 @@
     "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\"",
     "dev:frontend": "cd frontend && npm run dev",
     "dev:backend": "cd backend && python app.py",
-    "build": "cd frontend && npm run build",
-    "start": "cd backend && python app.py",
+  "build": "cd frontend && npm run build",
+  "start": "gunicorn backend.wsgi:app --bind 0.0.0.0:$PORT --workers 4",
     "install:all": "npm install && cd frontend && npm install && cd ../backend && pip install -r requirements.txt"
   },
   "keywords": [

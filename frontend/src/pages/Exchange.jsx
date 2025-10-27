@@ -3,9 +3,44 @@ import { motion } from 'framer-motion';
 import { useWeb3 } from '../context/Web3Context';
 import { ArrowDownUp, Wallet, Zap, TrendingUp, AlertCircle } from 'lucide-react';
 import { toast } from 'react-toastify';
+import { ethers } from 'ethers';
+import { useNetwork } from 'wagmi';
+import PendingTransactionsList from '../components/PendingTransactionsList';
+
+// FIX: Add DEX router ABI
+const DEX_ROUTER_ABI = [
+  "function swapExactETHForTokens(uint amountOutMin, address[] calldata path, address to, uint deadline) payable returns (uint[] memory amounts)",
+  "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) returns (uint[] memory amounts)",
+  "function swapExactTokensForETH(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) returns (uint[] memory amounts)",
+  "function getAmountsOut(uint amountIn, address[] calldata path) view returns (uint[] memory amounts)"
+];
 
 const Exchange = () => {
-  const { account, connectWallet } = useWeb3();
+  const { 
+    account, 
+    connectWallet, 
+    safeContractCall, 
+    connectContract, 
+    balance,
+    estimateGasWithPrice 
+  } = useWeb3();
+
+  // Get network-specific addresses
+  const { chain } = useNetwork();
+  const DEX_ROUTER_ADDRESS = chain?.id === 11155111 // Sepolia
+    ? import.meta.env.VITE_SEPOLIA_DEX_ROUTER_ADDRESS
+    : import.meta.env.VITE_BSC_DEX_ROUTER_ADDRESS || 
+      import.meta.env.VITE_PANCAKE_ROUTER_ADDRESS;
+      
+  const GREENHASH_TOKEN_ADDRESS = chain?.id === 11155111
+    ? import.meta.env.VITE_SEPOLIA_GREENHASH_ADDRESS
+    : import.meta.env.VITE_BSC_GREENHASH_ADDRESS;
+    
+  const WBNB_ADDRESS = chain?.id === 11155111
+    ? import.meta.env.VITE_SEPOLIA_WETH_ADDRESS
+    : import.meta.env.VITE_BSC_WBNB_ADDRESS || 
+      '0xae13d989daC2f0dEbFf460aC112a837C89BAa7cd'; // BSC Testnet WBNB
+
   const [fromToken, setFromToken] = useState('BNB');
   const [toToken, setToToken] = useState('GREENHASH');
   const [fromAmount, setFromAmount] = useState('');
@@ -21,8 +56,39 @@ const Exchange = () => {
     { symbol: 'GREENHASH', name: 'Green Hash Token', balance: '50000', price: '0.05' }
   ];
 
+  // Estimate output amount when input changes
+  const estimateOutputAmount = async (amountIn, pathFrom, pathTo) => {
+    if (!DEX_ROUTER_ADDRESS || !amountIn || parseFloat(amountIn) <= 0) return '0';
+
+    try {
+      const router = connectContract(DEX_ROUTER_ADDRESS, DEX_ROUTER_ABI);
+      if (!router) throw new Error('Cannot connect to router');
+
+      const path = [
+        pathFrom === 'BNB' ? WBNB_ADDRESS : GREENHASH_TOKEN_ADDRESS,
+        pathTo === 'BNB' ? WBNB_ADDRESS : GREENHASH_TOKEN_ADDRESS
+      ];
+
+      const amountInWei = ethers.utils.parseEther(amountIn);
+      const amounts = await router.getAmountsOut(amountInWei, path);
+      return ethers.utils.formatEther(amounts[1]);
+    } catch (error) {
+      console.error('Error estimating output:', error);
+      // Fallback to simple price calculation for testing
+      return (parseFloat(amountIn) * parseFloat(exchangeRate)).toString();
+    }
+  };
+
   useEffect(() => {
     if (fromAmount && fromToken && toToken) {
+      const updateEstimate = async () => {
+        const estimated = await estimateOutputAmount(fromAmount, fromToken, toToken);
+        setToAmount(estimated);
+        // Set minimum received with 0.5% slippage
+        setMinimumReceived((parseFloat(estimated) * 0.995).toFixed(8));
+      };
+      updateEstimate();
+    }
       calculateExchange();
     }
   }, [fromAmount, fromToken, toToken]);
@@ -50,7 +116,7 @@ const Exchange = () => {
     setMinimumReceived((finalAmount * 0.99).toFixed(6));
   };
 
-  const handleSwap = async () => {
+    const handleSwap = async () => {
     if (!account) {
       toast.error('Veuillez connecter votre wallet');
       return;
@@ -62,20 +128,117 @@ const Exchange = () => {
     }
 
     setIsSwapping(true);
-    
+
     try {
-      // Simuler la transaction de swap
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      
-      toast.success(`Swap réussi! ${fromAmount} ${fromToken} → ${toAmount} ${toToken}`);
-      setFromAmount('');
-      setToAmount('');
+      if (DEX_ROUTER_ADDRESS && GREENHASH_TOKEN_ADDRESS) {
+        const router = connectContract(DEX_ROUTER_ADDRESS, DEX_ROUTER_ABI);
+        if (!router) throw new Error('Impossible de connecter le router DEX');
+
+        // Handle different swap types (BNB -> Token, Token -> BNB, Token -> Token)
+        if (fromToken === 'BNB') {
+          const receipt = await safeContractCall(async ({ signer, estimateGasWithPrice }) => {
+            const routerWithSigner = router.connect(signer);
+            
+            // Path: WBNB -> GREENHASH
+            const path = [WBNB_ADDRESS, GREENHASH_TOKEN_ADDRESS];
+            const amountIn = ethers.utils.parseEther(fromAmount);
+            const amountOutMin = ethers.utils.parseEther(minimumReceived || '0');
+            const deadline = Math.floor(Date.now() / 1000) + 60 * 20; // 20 minutes
+
+            // Populate transaction for gas estimation
+            const populated = await routerWithSigner.populateTransaction.swapExactETHForTokens(
+              amountOutMin,
+              path,
+              account,
+              deadline,
+              { value: amountIn }
+            );
+
+            // Estimate gas
+            const { gasLimit, gasPrice } = await estimateGasWithPrice(() => populated);
+
+            // Execute swap
+            const tx = await routerWithSigner.swapExactETHForTokens(
+              amountOutMin,
+              path,
+              account,
+              deadline,
+              { 
+                value: amountIn,
+                gasLimit,
+                gasPrice
+              }
+            );
+
+            return tx;
+          });
+
+          if (receipt) {
+            toast.success(`Swap de ${fromAmount} ${fromToken} vers ${toAmount} ${toToken} confirmé!`);
+            setFromAmount('');
+            setToAmount('');
+          }
+        } else if (toToken === 'BNB') {
+          // Token -> BNB swap implementation
+          const receipt = await safeContractCall(async ({ signer, estimateGasWithPrice }) => {
+            const routerWithSigner = router.connect(signer);
+            const path = [GREENHASH_TOKEN_ADDRESS, WBNB_ADDRESS];
+            const amountIn = ethers.utils.parseEther(fromAmount);
+            const amountOutMin = ethers.utils.parseEther(minimumReceived || '0');
+            const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
+
+            const populated = await routerWithSigner.populateTransaction.swapExactTokensForETH(
+              amountIn,
+              amountOutMin,
+              path,
+              account,
+              deadline
+            );
+
+            const { gasLimit, gasPrice } = await estimateGasWithPrice(() => populated);
+
+            const tx = await routerWithSigner.swapExactTokensForETH(
+              amountIn,
+              amountOutMin,
+              path,
+              account,
+              deadline,
+              { gasLimit, gasPrice }
+            );
+
+            return tx;
+          });
+
+          if (receipt) {
+            toast.success(`Swap de ${fromAmount} ${fromToken} vers ${toAmount} ${toToken} confirmé!`);
+            setFromAmount('');
+            setToAmount('');
+          }
+        }
+      } else {
+        // FIX: Fallback to simulation via safeContractCall for consistent UX
+        const fakeReceipt = await safeContractCall(() => {
+          const fakeTx = {
+            hash: '0x' + Math.random().toString(16).slice(2, 66),
+            wait: async () => new Promise(resolve => setTimeout(() => resolve({ 
+              status: 1, 
+              transactionHash: '0xsimulated-swap' 
+            }), 2000))
+          };
+          return Promise.resolve(fakeTx);
+        });
+
+        if (fakeReceipt) {
+          toast.success(`Swap de ${fromAmount} ${fromToken} vers ${toAmount} ${toToken} (simulation) réussi!`);
+          setFromAmount('');
+          setToAmount('');
+        }
+      }
     } catch (error) {
-      toast.error('Erreur lors du swap');
+      toast.error(`Erreur lors du swap: ${error.message}`);
     } finally {
       setIsSwapping(false);
     }
-  };
 
   const handleSwitchTokens = () => {
     const temp = fromToken;
